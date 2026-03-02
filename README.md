@@ -194,7 +194,6 @@ cd aplikasi-logistik
 ### 2️⃣ Buat Virtual Environment
 
 ```bash
-python -3 -m venv .venv
 python -m venv .venv
 ```
 
