@@ -16,7 +16,7 @@
 
     <!-- FONT -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
     <!-- QR -->
     <script src="https://unpkg.com/html5-qrcode"></script>
 
@@ -118,7 +118,7 @@
         <h6 class="text-muted mb-1">Driver</h6>
         <h4 class="mb-2">{{ kurir_azka.username_azka }}</h4>
         <div class="card-box mb-4 text-center">
-        <h6 class="fw-semibold mb-3">QR Identitas Driver</h6>
+        <h6 class="fw-semibold mb-3">QR Identitas Driver + mobil</h6>
 
             <img id="qrKurir"
                 src="/qr_sopir_azka/{{ kurir_azka.id_azka }}"
@@ -177,231 +177,174 @@
             <div class="row g-3 mb-4">
     <div class="col-12">
         <input type="text" id="manualScanInput" class="form-control scan-input" 
-               placeholder="🔍 Scan manual QR Gudang atau gunakan tombol kamera">
+               placeholder="🔍 Scan QR Gudang (Kamera / Gambar / Manual)">
     </div>
 </div>
 
-<div class="row g-3 mb-4">
+<!-- BUTTON SCAN -->
+<div class="row g-3 mb-4 text-center">
     <div class="col-3">
-        <button type="button" class="btn btn-success w-100 scan-btn" onclick="startInScan()">
-            📥 SCAN MASUK
+        <button class="btn btn-success w-100 scan-btn" onclick="currentScanType='IN'; startScan('IN');">
+            📥 IN
         </button>
     </div>
     <div class="col-3">
-        <button type="button" class="btn btn-warning w-100 scan-btn" onclick="startReturnScan()">
-            🔄 KEMBALI GUDANG
+        <button class="btn btn-danger w-100 scan-btn" onclick="currentScanType='OUT'; startScan('OUT');">
+            📤 OUT
         </button>
     </div>
     <div class="col-3">
-        <button type="button" class="btn btn-danger w-100 scan-btn" onclick="startOutScan()">
-            📤 SCAN KELUAR
+        <button class="btn btn-warning w-100 scan-btn" onclick="currentScanType='RETURN'; startScan('RETURN');">
+            🔄 RETURN
         </button>
     </div>
     <div class="col-3">
-        <button type="button" class="btn btn-secondary w-100 scan-btn" onclick="stopAllScans()">
-            ⏹ STOP
+        <button class="btn btn-primary w-100 scan-btn" onclick="currentScanType='DROP'; startScan('DROP');">
+            📦 DROP
         </button>
     </div>
 </div>
 
+<!-- SCANNER -->
+<div class="card-box mb-4">
+    <h6 class="fw-semibold mb-3">📸 Scanner QR Gudang (Kamera / Gambar)</h6>
+    <div id="readerDriver"></div>
+<div id="scanResult" class="mt-3"></div>
 </div>
 
-<!-- SCANNER CONTAINERS -->
-<div class="card-box mb-4" id="scannerContainer">
-    <h6 class="fw-semibold mb-3">📸 Arahkan kamera ke QR Gudang</h6>
-    
-    <div id="inReader" style="display: none;"></div>
-    <div id="outReader" style="display: none;"></div>
-    
-    <div id="scanResult" class="mt-3"></div>
 </div>
 <!-- RIWAYAT PENGIRIMAN -->
-
 <script>
-
-let inScanner = null;
-let outScanner = null;
+let scanner = null;
 let currentScanType = null;
 
-// ======================= SOUND =======================
-function playSound(type) {
-    try {
-        let audio;
-        if (type === "success") {
-            audio = new Audio("https://actions.google.com/sounds/v1/cartoon/clang_and_wobble.ogg");
-        } else {
-            audio = new Audio("https://actions.google.com/sounds/v1/cartoon/wood_plank_flicks.ogg");
+// ======================= START SCAN =======================
+function startScan(type) {
+
+    currentScanType = type;
+
+    // reset scanner kalau sudah ada
+    if (scanner) {
+        document.getElementById("readerDriver").innerHTML = "";
+    }
+
+    scanner = new Html5QrcodeScanner(
+        "readerDriver",
+        {
+            fps: 10,
+            qrbox: 250,
+            rememberLastUsedCamera: true,
+            supportedScanTypes: [
+                Html5QrcodeScanType.SCAN_TYPE_CAMERA,
+                Html5QrcodeScanType.SCAN_TYPE_FILE
+            ]
         }
-        audio.play().catch(() => {});
-    } catch(e) {}
-}
-
-// =====================================================
-// ================= IN SCANNER ========================
-// =====================================================
-function startInScan() {
-    if (inScanner) return;
-    
-    currentScanType = 'IN';
-    document.getElementById('inReader').style.display = 'block';
-    document.getElementById('outReader').style.display = 'none';
-    
-    inScanner = new Html5QrcodeScanner(
-        "inReader",
-        { fps: 10, qrbox: 250, rememberLastUsedCamera: true }
     );
-    
-    inScanner.render((decodedText) => {
-        prosesScan(decodedText, 'IN');
+
+    scanner.render((decodedText) => {
+        prosesScan(decodedText);
     });
 }
 
-// =====================================================
-// ================= OUT SCANNER =======================
-// =====================================================
-function startReturnScan() {
-    if (outScanner) return;
-    
-    currentScanType = 'RETURN';
-    document.getElementById('outReader').style.display = 'block';
-    document.getElementById('inReader').style.display = 'none';
-    
-    outScanner = new Html5QrcodeScanner(
-        "outReader",
-        { fps: 10, qrbox: 250, rememberLastUsedCamera: true }
-    );
-    
-    outScanner.render((decodedText) => {
-        prosesScan(decodedText, 'RETURN');
-    });
-}
+// ======================= PROCESS =======================
+function prosesScan(qr) {
 
-function startOutScan() {
-    if (outScanner) return;
-    
-    currentScanType = 'OUT';
-    document.getElementById('outReader').style.display = 'block';
-    document.getElementById('inReader').style.display = 'none';
-    
-    outScanner = new Html5QrcodeScanner(
-        "outReader",
-        { fps: 10, qrbox: 250, rememberLastUsedCamera: true }
-    );
-    
-    outScanner.render((decodedText) => {
-        prosesScan(decodedText, 'OUT');
-    });
-}
-
-// =====================================================
-// ================= SCAN PROCESS ======================
-// =====================================================
-function prosesScan(qr, scanType) {
-    const data = qr.split("|");
-    
-    if (data[0] !== "GUDANG") {
-        showScanResult("❌ QR bukan QR Gudang", "danger");
+    if (!currentScanType) {
+        showResult("⚠️ Pilih jenis scan dulu!", "warning");
         playSound("danger");
         return;
     }
-    
+
+    const data = qr.split("|");
+
+    // Jika scan DROP -> boleh paket
+    if (currentScanType === "DROP") {
+        if (data.length < 2 || data[0] !== "PAKET") {
+            showResult("❌ QR bukan Paket!", "danger");
+            playSound("danger");
+            return;
+        }
+        // Kirim ke backend dengan paket_id
+        fetch("/scan_sopir_azka", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
+            body: JSON.stringify({
+                scan_type_azka: currentScanType,
+                package_id_azka: data[1]
+            })
+        })
+        .then(res => res.json())
+        .then(data => {
+            showResult("✅ " + data.message, "success");
+            playSound("success");
+            if (navigator.vibrate) navigator.vibrate(200);
+            setTimeout(() => { document.getElementById("readerDriver").innerHTML = ""; scanner = null; }, 1000);
+        })
+        .catch(err => {
+            console.error(err);
+            showResult("❌ " + (err.message || "Terjadi kesalahan"), "danger");
+            playSound("danger");
+        });
+
+        return;
+    }
+
+    // Scan lain (IN/OUT/RETURN) tetap pakai QR GUDANG
+    if (data.length < 2 || data[0] !== "GUDANG") {
+        showResult("❌ QR bukan Gudang!", "danger");
+        playSound("danger");
+        return;
+    }
+
     fetch("/scan_sopir_azka", {
         method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
         body: JSON.stringify({
-            scan_type_azka: scanType,
+            scan_type_azka: currentScanType,
             warehouse_id_azka: data[1]
         })
     })
-    .then(res => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json().catch(() => res.text());
-    })
+    .then(res => res.json())
     .then(data => {
-        const message = typeof data === 'string' ? data : data.message || "Scan berhasil";
-        showScanResult(message, "success");
+        showResult("✅ " + data.message, "success");
         playSound("success");
-        
         if (navigator.vibrate) navigator.vibrate(200);
-        
-        // Reload page after success
-        setTimeout(() => location.reload(), 1500);
+        setTimeout(() => { document.getElementById("readerDriver").innerHTML = ""; scanner = null; }, 1000);
     })
     .catch(err => {
         console.error(err);
-        const message = err.message.includes('401') ? "Session habis. Silakan login ulang." :
-                       err.message.includes('403') ? "Akses ditolak." :
-                       "Scan gagal";
-        showScanResult(message, "danger");
+        showResult("❌ " + (err.message || "Terjadi kesalahan"), "danger");
         playSound("danger");
     });
 }
+// ======================= MANUAL INPUT =======================
+document.getElementById("manualScanInput")
+.addEventListener("change", function () {
 
-// =====================================================
-// ================= MANUAL INPUT ======================
-// =====================================================
-document.addEventListener('DOMContentLoaded', function() {
-    const manualInput = document.getElementById('manualScanInput');
-    manualInput.addEventListener('change', function() {
-        const qr = this.value.trim();
-        this.value = '';
-        if (!qr || !currentScanType) {
-            showScanResult("Pilih SCAN IN atau SCAN OUT terlebih dahulu", "warning");
-            return;
-        }
-        prosesScan(qr, currentScanType);
-    });
-    
-    // Enter key support
-    manualInput.addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') {
-            manualInput.dispatchEvent(new Event('change'));
-        }
-    });
+    const qr = this.value.trim();
+    this.value = "";
+
+    if (!qr) return;
+
+    prosesScan(qr);
 });
 
-// =====================================================
-// ================= RESULT DISPLAY ====================
-// =====================================================
-function showScanResult(message, type) {
-    const resultDiv = document.getElementById('scanResult');
-    resultDiv.innerHTML = `<div class="alert alert-${type} alert-dismissible fade show">
-        ${message}
-        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-    </div>`;
+// ======================= UI =======================
+function showResult(message, type) {
+    document.getElementById("scanResult").innerHTML =
+        `<div class="alert alert-${type}">${message}</div>`;
 }
 
-// =====================================================
-// ================= STOP ALL ==========================
-// =====================================================
-function stopAllScans() {
-    if (inScanner) {
-        inScanner.clear();
-        inScanner = null;
-    }
-    if (outScanner) {
-        outScanner.clear();
-        outScanner = null;
-    }
-    currentScanType = null;
-    document.getElementById('inReader').style.display = 'none';
-    document.getElementById('outReader').style.display = 'none';
-    document.getElementById('scanResult').innerHTML = '';
-}
-
-// Toast notification (existing)
-function showMessage(msg, type = '') {
-    const toastEl = document.getElementById('liveToast');
-    const toastBody = document.getElementById('toastMessage');
-    toastBody.textContent = msg;
-    toastEl.classList.remove('bg-success', 'bg-danger');
-    if (type === 'success') toastEl.classList.add('bg-success');
-    else if (type === 'danger') toastEl.classList.add('bg-danger');
-    const toast = new bootstrap.Toast(toastEl);
-    toast.show();
+// ======================= SOUND =======================
+function playSound(type) {
+    let audio = new Audio(
+        type === "success"
+        ? "https://actions.google.com/sounds/v1/cartoon/clang_and_wobble.ogg"
+        : "https://actions.google.com/sounds/v1/cartoon/wood_plank_flicks.ogg"
+    );
+    audio.play().catch(()=>{});
 }
 </script>
 

@@ -918,6 +918,17 @@
                         name="wilayah_azka"
                         placeholder="Masukkan wilayah kurir">
                 </div>
+                <div id="gudangField" style="display:none;">
+                <label class="mt-2">Pilih Gudang</label>
+                <select name="warehouse_id_azka">
+                    <option value="">-- Pilih Gudang --</option>
+                    {% for g in warehouses %}
+                    <option value="{{ g.id_azka }}">
+                        {{ g.nama_azka }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
                 <div class="d-flex justify-content-end gap-3 mt-4">
                     <a href="#" class="btn btn-secondary">Batal</a>
                     <button type="submit" class="btn btn-success">
@@ -1044,15 +1055,19 @@ document.getElementById('roleSelect').addEventListener('change', function() {
 
     const selectedOption = this.options[this.selectedIndex];
     const roleName = selectedOption.getAttribute('data-role-name');
-    const wilayahField = document.getElementById('wilayahField');
 
-    if(roleName && roleName.toLowerCase() === 'kurir') {
-        wilayahField.style.display = 'block';
-        wilayahField.querySelector('input').required = true;
-    } else {
-        wilayahField.style.display = 'none';
-        wilayahField.querySelector('input').required = false;
-        wilayahField.querySelector('input').value = '';
+    const gudangField = document.getElementById('gudangField');
+
+    if(roleName) {
+        const roleNameLower = roleName.toLowerCase();
+
+        if(roleNameLower === 'gudang' || roleNameLower === 'kurir') {
+            gudangField.style.display = 'block';
+            gudangField.querySelector('select').required = true;
+        } else {
+            gudangField.style.display = 'none';
+            gudangField.querySelector('select').required = false;
+        }
     }
 });
 </script>

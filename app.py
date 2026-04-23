@@ -35,58 +35,242 @@ def disable_cache(response):
     response.headers['Expires'] = '0'
     return response
 
+GEOCODE_CACHE = {}
+
+# =========================
+# 🔥 EXTRACT KODE POS
+# =========================
+def extract_postal_code(address):
+    match = re.search(r'\b\d{5}\b', address)
+    return match.group(0) if match else None
+
+
+# =========================
+# 🔥 DETEKSI KOTA
+# =========================
+def extract_city(words):
+    priority_cities = [
+        "jakarta","bandung","bekasi","bogor","depok",
+        "tangerang","surabaya","medan","semarang",
+        "makassar","palembang","yogyakarta","solo",
+        "cirebon","tasikmalaya","garut"
+    ]
+
+    for w in reversed(words):
+        if w in priority_cities:
+            return w
+
+    return " ".join(words[-2:]) if len(words) >= 2 else "indonesia"
+
+
+# =========================
+# 🔥 NORMALIZE (UNTUK API)
+# =========================
 def normalize_address(address):
     address = address.lower()
-    address = address.replace("no.", "")
-    address = address.replace("jl.", "jalan")
-    address = address.replace("kec.", "")
-    address = address.replace("kab.", "")
-    address = address.replace("kota", "")
+
+    replacements = {
+        "jl.": "jalan ",
+        "jln": "jalan ",
+        "gg.": "gang ",
+        "kp.": "kampung ",
+        "no.": " ",
+        "nomor": " ",
+        "kec.": "kecamatan ",
+        "kab.": "kabupaten ",
+        "prov.": "provinsi "
+    }
+
+    for k, v in replacements.items():
+        address = address.replace(k, v)
+
+    # 🔥 JAGA KODE POS
+    address = re.sub(r'\b\d{5}\b', lambda m: f" {m.group(0)} ", address)
+
+    # RT/RW
+    address = re.sub(r'rt\s*0*(\d+)', r'rt \1', address)
+    address = re.sub(r'rw\s*0*(\d+)', r'rw \1', address)
+
+    # pisah angka & huruf
+    address = re.sub(r'(\d)([a-zA-Z])', r'\1 \2', address)
+    address = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', address)
+
+    # hapus karakter aneh
+    address = re.sub(r'[^a-z0-9\s,]', ' ', address)
+
+    # hapus koma dobel
+    address = re.sub(r',+', ',', address)
+
+    # 🔥 FIX jalan dobel
+    address = re.sub(r'\bjalan jalan\b', 'jalan', address)
+
+    # hapus noise
+    noise_words = [
+        "dekat","seberang","belakang","samping",
+        "rumah","warna","pagar","kontrakan","kos"
+    ]
+    words = [w for w in address.split() if w not in noise_words]
+
+    words = words[:12]
+
+    address = " ".join(words)
+    address = re.sub(r'\s+', ' ', address)
+
     return address.strip()
 
+
+# =========================
+# 🔥 NORMALIZE DISPLAY
+# =========================
+def normalize_address_readable(address):
+    address = address.lower()
+
+    replacements = {
+        "jl.": "jalan",
+        "jln": "jalan",
+        "gg.": "gang",
+        "kp.": "kampung",
+        "kec.": "kecamatan",
+        "kab.": "kabupaten",
+        "prov.": "provinsi"
+    }
+
+    for k, v in replacements.items():
+        address = address.replace(k, v)
+
+    address = re.sub(r'rt\s*0*(\d+)', r'rt \1', address)
+    address = re.sub(r'rw\s*0*(\d+)', r'rw \1', address)
+    address = re.sub(r',\s*', ', ', address)
+
+    return address.title().strip()
+
+
+# =========================
+# 🔥 MAIN GEOCODE FUNCTION
+# =========================
 def get_lat_lng_city_from_address(address):
     try:
-        time.sleep(1)
-        clean_address = normalize_address(address)
+        if not address:
+            return None
+
+        if address in GEOCODE_CACHE:
+            return GEOCODE_CACHE[address]
+
+        readable = normalize_address_readable(address)
+        clean = normalize_address(address)
+        postal_code = extract_postal_code(address)
 
         url = "https://nominatim.openstreetmap.org/search"
         headers = {"User-Agent": "LogisticsAzka/1.0"}
 
-        res = requests.get(
-            url,
-            params={
-                "q": clean_address,
-                "format": "json",
-                "limit": 1,
-                "addressdetails": 1
-            },
-            headers=headers,
-            timeout=10
-        )
+        words = clean.split()
+        city_guess = extract_city(words)
 
-        data = res.json()
+        # =========================
+        # 🔥 VARIASI JALAN
+        # =========================
+        clean_jl = clean.replace("jalan", "jl")
+        clean_no_jalan = clean.replace("jalan", "")
 
-        if data:
-            lat = float(data[0]["lat"])
-            lng = float(data[0]["lon"])
-            addr = data[0].get("address", {})
+        queries = []
 
-            city = (
-                addr.get("city")
-                or addr.get("town")
-                or addr.get("county")
-                or addr.get("state")
-                or "TIDAK DIKETAHUI"
-            )
+        # 1. FULL + ZIP + CITY
+        if postal_code:
+            queries.append({"q": f"{clean}, {postal_code}, {city_guess}, indonesia"})
+            queries.append({"q": f"{clean_jl}, {postal_code}, {city_guess}, indonesia"})
 
-            return lat, lng, city.upper()
+        # 2. FULL + CITY
+        queries.append({"q": f"{clean}, {city_guess}, indonesia"})
+        queries.append({"q": f"{clean_jl}, {city_guess}, indonesia"})
+        queries.append({"q": f"{clean_no_jalan}, {city_guess}, indonesia"})
+
+        # 3. FULL ONLY
+        queries.append({"q": f"{clean}, indonesia"})
+        queries.append({"q": f"{clean_jl}, indonesia"})
+
+        # 4. ZIP ONLY
+        if postal_code:
+            queries.append({"q": f"{postal_code}, indonesia"})
+
+        # 5. CITY ONLY
+        queries.append({"q": f"{city_guess}, indonesia"})
+
+        # =========================
+        # 🔥 EXECUTE
+        # =========================
+        for params in queries:
+            print("🔍 TRY:", params)
+            time.sleep(1)
+
+            for _ in range(2):
+                try:
+                    res = requests.get(
+                        url,
+                        params={
+                            **params,
+                            "format": "json",
+                            "limit": 1,
+                            "addressdetails": 1,
+                            "countrycodes": "id"
+                        },
+                        headers=headers,
+                        timeout=10
+                    )
+
+                    data = res.json()
+
+                    if data:
+                        result = data[0]
+                        addr = result.get("address", {})
+
+                        if addr.get("country_code") != "id":
+                            continue
+
+                        lat = float(result["lat"])
+                        lng = float(result["lon"])
+
+                        city = (
+                            addr.get("city")
+                            or addr.get("town")
+                            or addr.get("county")
+                            or city_guess
+                        )
+
+                        # 🔥 VALIDASI ZIP
+                        if postal_code:
+                            display = result.get("display_name", "")
+                            if postal_code not in display:
+                                continue
+
+                        output = {
+                            "lat": lat,
+                            "lng": lng,
+                            "city": city.upper(),
+                            "postal_code": postal_code,
+                            "address_display": readable,
+                            "address_full": f"{readable}, {city}"
+                        }
+
+                        GEOCODE_CACHE[address] = output
+                        return output
+
+                except Exception:
+                    time.sleep(2)
 
     except Exception as e:
-        print("Geocoding error:", e)
+        print("🔥 ERROR:", e)
 
-    return None, None, "TIDAK DIKETAHUI"
-
-
+    # =========================
+    # 🔥 FALLBACK
+    # =========================
+    return {
+        "lat": None,
+        "lng": None,
+        "city": extract_city(normalize_address(address).split()).upper(),
+        "postal_code": extract_postal_code(address),
+        "address_display": normalize_address_readable(address),
+        "address_full": normalize_address_readable(address)
+    }
 def safe_filename(name):
     return re.sub(r'[^a-zA-Z0-9_-]', '_', name.lower())
 def get_description(status, warehouse_name, is_interisland, receiver_city="", next_warehouse_city=""):
@@ -96,13 +280,13 @@ def get_description(status, warehouse_name, is_interisland, receiver_city="", ne
     # SETELAH PICKUP + SCAN OUT
     if status == 'ARRIVED_AT_ORIGIN_HUB':
         next_city = next_warehouse_city or receiver_city or 'gudang selanjutnya'
-        return f"🚚 Paket telah keluar dari gudang asal {warehouse_name} menuju kota gudang {next_city}"
+        return f"🚚 Paket telah keluar dari gudang asal {warehouse_name}|{next_city}"
 
     if status == 'IN_TRANSIT':
         if is_interisland:
             return f"🚢 Paket sedang dalam pengiriman antar pulau dari {warehouse_name} ke {receiver_city or 'wilayah tujuan'}"
         next_city = next_warehouse_city or receiver_city or 'daerah tujuan'
-        return f"🚛 Paket sedang dalam perjalanan dari {warehouse_name} ke {next_city}"
+        return f"🚛 Paket sedang dalam perjalanan dari {warehouse_name}|{next_city}"
 
     if status == 'TRANSIT_HUB':
         return f"🔄 Paket sedang transit di hub {warehouse_name}"
@@ -290,12 +474,14 @@ def admin_dashboard_azka():
         """, (status_azka,))
         status_count_azka[status_azka] = cursor_azka.fetchone()['total_azka']
 
-    # ===================== LOG PAKET PER SHIPMENT (FINAL - NO DOUBLE) =====================
+# ===================== LOG PAKET PER SHIPMENT (FINAL - NO DOUBLE) + ESTIMASI WAKTU =====================
     cursor_azka.execute("""
     SELECT DISTINCT
         s.id_azka AS shipment_id_azka,
         s.tracking_number_azka,
         s.status_azka,
+        s.created_at_azka AS shipment_created_at,
+        s.updated_at_azka AS delivered_time,
 
         u.username_azka AS nama_aktor_azka,
 
@@ -345,8 +531,46 @@ def admin_dashboard_azka():
 
     raw_logs_azka = cursor_azka.fetchall()
 
+    def calculate_eta(status_azka, updated_at_azka=None, created_at_azka=None):
+        """Hitung estimasi waktu berdasarkan status - DELIVERED pakai updated_at_azka dari log"""
+        from datetime import datetime, timedelta
+        
+        now = datetime.now()
+        
+        if status_azka == 'DELIVERED' and updated_at_azka:
+            base_date = created_at_azka or now
+            
+            # Estimasi total minimal 3 hari dari CREATED sampai DELIVERED
+            eta_date = base_date + timedelta(days=3)
+            
+            if updated_at_azka > eta_date:
+                return f"🛑 Delivered Late: {updated_at_azka.strftime('%d/%m/%Y %H:%M')} (ETA: {eta_date.strftime('%d/%m/%Y %H:%M')})"
+            else:
+                return f"✅ Delivered On-Time: {updated_at_azka.strftime('%d/%m/%Y %H:%M')} (ETA: {eta_date.strftime('%d/%m/%Y %H:%M')})"
 
-    # ================= GROUP PER SHIPMENT =================
+        base_date = created_at_azka or now
+        
+        eta_map = {
+            'CREATED': timedelta(days=2),
+            'DRIVER_ASSIGNED': timedelta(days=2),
+            'PICKUP': timedelta(days=1),
+            'ARRIVED_AT_ORIGIN_HUB': timedelta(days=1),
+            'IN_TRANSIT': timedelta(hours=12),
+            'TRANSIT_HUB': timedelta(hours=6),
+            'SORTING': timedelta(hours=6),
+            'READY_FOR_DELIVERY': timedelta(hours=4)
+        }
+        
+        eta_offset = eta_map.get(status_azka, timedelta(days=3))
+        eta_date = base_date + eta_offset
+        
+        # Cek jika ETA sudah lewat
+        if now > eta_date:
+            return f"⏰ Terlambat: {eta_date.strftime('%d/%m/%Y %H:%M')}"
+        
+        return f"Est: {now.strftime('%d/%m/%Y %H:%M')} → {eta_date.strftime('%d/%m/%Y %H:%M')}"
+
+    # ================= GROUP PER SHIPMENT + ESTIMASI =================
     shipment_logs_azka = {}
 
     for row in raw_logs_azka:
@@ -357,6 +581,9 @@ def admin_dashboard_azka():
                 "shipment_id_azka": sid,
                 "tracking_number_azka": row['tracking_number_azka'],
                 "status_azka": row['status_azka'],
+                "shipment_created_at": row['shipment_created_at'],
+                "delivered_time": row['delivered_time'],
+                "estimated_delivery": calculate_eta(row['status_azka'], row['delivered_time'], row['shipment_created_at']),
                 "logs": []
             }
 
@@ -652,6 +879,8 @@ def admin_users_azka():
     roles_azka = cursor.fetchall()
 
     
+    cursor.execute("SELECT * FROM tbl_warehouses_azka")
+    warehouses = cursor.fetchall()
 
     cursor.close()
     conn.close()
@@ -660,6 +889,7 @@ def admin_users_azka():
         'admin_users_azka.html',
         users=users,
         roles_azka=roles_azka,
+        warehouses=warehouses,   # ✅ WAJIB
         username_azka=session.get('username_azka')
     )
 @app.route('/admin_users_add_azka', methods=['GET', 'POST'])
@@ -676,18 +906,7 @@ def admin_users_add_azka():
         email_azka = request.form['email_azka']
         password_hash_azka = request.form['password_hash_azka']
         role_id_azka = request.form['role_id_azka']
-        wilayah_azka = request.form.get('wilayah_azka', '').strip().upper()
-
-        # Normalisasi awalan wilayah
-        if wilayah_azka.startswith('KAB'):
-            wilayah_azka = wilayah_azka.replace('KAB.', '')
-            wilayah_azka = wilayah_azka.replace('KAB', '')
-            wilayah_azka = 'KABUPATEN ' + wilayah_azka.strip()
-
-        elif wilayah_azka.startswith('KOTA'):
-            wilayah_azka = wilayah_azka.replace('KOTA.', '')
-            wilayah_azka = wilayah_azka.replace('KOTA', '')
-            wilayah_azka = 'KOTA ' + wilayah_azka.strip()
+        warehouse_id_azka = request.form.get('warehouse_id_azka')
 
         password_hash_azka = generate_password_hash(
             password_hash_azka,
@@ -695,25 +914,31 @@ def admin_users_add_azka():
             salt_length=16
         )
 
-        # cek role
         cursor.execute("SELECT nama_azka FROM tbl_roles_azka WHERE id_azka=%s", (role_id_azka,))
-        role = cursor.fetchone()
+        role_data = cursor.fetchone()
+        role = role_data['nama_azka'].lower() if role_data else None
 
-        if role and role['nama_azka'].lower() == 'kurir':
-            wilayah = wilayah_azka
-        else:
-            wilayah = None
+        warehouse_id = None
 
+        # ✅ hanya gudang & kurir pakai gudang
+        if role in ['gudang', 'kurir']:
+            if not warehouse_id_azka:
+                flash("Gudang wajib dipilih!", "danger")
+                return redirect(url_for('admin_users_azka'))
+
+            warehouse_id = int(warehouse_id_azka)
+
+        # ✅ FIX placeholder
         cursor.execute("""
             INSERT INTO tbl_users_azka
-            (username_azka, email_azka, password_hash_azka, role_id_azka, is_active_azka, wilayah_azka)
+            (username_azka, email_azka, password_hash_azka, role_id_azka, is_active_azka, warehouse_id_azka)
             VALUES (%s, %s, %s, %s, 1, %s)
         """, (
             username_azka,
             email_azka,
             password_hash_azka,
             role_id_azka,
-            wilayah
+            warehouse_id
         ))
 
         conn.commit()
@@ -725,7 +950,6 @@ def admin_users_add_azka():
         'admin_users_azka.html',
         username_azka=session.get('username_azka')
     )
-
 @app.route('/admin_users_edit_azka/<int:id_azka>', methods=['POST'])
 def admin_users_edit_azka(id_azka):
     if 'user_id_azka' not in session or session.get('role_id_azka') != 1:
@@ -1098,7 +1322,11 @@ def gudang_add_azka():
     address_azka = request.form['address_azka']
 
     # 🌍 Geocoding alamat gudang
-    lat, lng, city = get_lat_lng_city_from_address(address_azka)
+    geo = get_lat_lng_city_from_address(address_azka)
+
+    lat = geo["lat"]
+    lng = geo["lng"]
+    city = geo["city"]
 
     if lat is None or lng is None:
         flash(
@@ -1171,50 +1399,6 @@ def gudang_edit_azka(id_azka):
 
     flash("gudang berhasil diupdate!", "success")
     return redirect('/gudang_azka')
-@app.route('/gudang_delete_azka/<int:id>')
-def gudang_delete_azka(id):
-    conn = get_db_connection_azka()
-    cursor = conn.cursor(dictionary=True)
-
-    # 🔍 cek relasi shipment
-    cursor.execute("""
-        SELECT COUNT(*) AS total
-        FROM tbl_shipment_azka
-        WHERE warehouse_id_azka = %s
-    """, (id,))
-    shipment_count = cursor.fetchone()['total']
-
-    # 🔍 cek relasi scan kurir (jika tabel ada)
-    cursor.execute("""
-        SELECT COUNT(*) AS total
-        FROM tbl_courier_scans_azka
-        WHERE warehouse_id_azka = %s
-    """, (id,))
-    scan_count = cursor.fetchone()['total']
-
-    if shipment_count > 0 or scan_count > 0:
-        conn.close()
-        flash(
-            f"❌ Gudang tidak bisa dihapus! "
-            f"Masih terhubung dengan {shipment_count} shipment "
-            f"dan {scan_count} riwayat scan.",
-            "warning"
-        )
-        return redirect(url_for('gudang_azka'))
-
-    # ✅ aman untuk dihapus
-    cursor.execute("""
-        DELETE FROM tbl_warehouses_azka
-        WHERE id_azka = %s
-    """, (id,))
-
-    conn.commit()
-    conn.close()
-
-    flash("✅ Gudang berhasil dihapus", "success")
-    return redirect(url_for('gudang_azka'))
-
-
 
 @app.route('/qr_paket_azka/<tracking>')
 def qr_paket_azka(tracking):
@@ -1249,10 +1433,13 @@ def shipment_azka():
     conn = get_db_connection_azka()
     cursor = conn.cursor(dictionary=True)
 
-    # ===== DATA SHIPMENT =====
+    # =========================
+    # 📦 DATA SHIPMENT
+    # =========================
     cursor.execute("""
         SELECT
             s.id_azka,
+            s.warehouse_id_azka,
             s.tracking_number_azka,
             s.sender_name_azka,
             s.receiver_name_azka,
@@ -1266,97 +1453,249 @@ def shipment_azka():
             s.qr_code_data_azka,
             u.username_azka AS courier,
             s.driver_id_azka,
-            w.nama_azka AS origin_name
+            w.nama_azka AS origin_name,
+            w.address_azka AS origin_address
         FROM tbl_shipment_azka s
         LEFT JOIN tbl_users_azka u
             ON s.courier_id_azka = u.id_azka
         LEFT JOIN tbl_warehouses_azka w
             ON s.warehouse_id_azka = w.id_azka
         ORDER BY s.created_at_azka DESC
+        LIMIT 50
     """)
     shipments = cursor.fetchall()
 
-    # ===== AMBIL SEMUA GUDANG SEBAGAI HUB =====
+    # =========================
+    # 🏭 SEMUA HUB
+    # =========================
     cursor.execute("""
         SELECT id_azka, nama_azka, latitude_azka, longitude_azka
         FROM tbl_warehouses_azka
-        WHERE latitude_azka IS NOT NULL AND longitude_azka IS NOT NULL
-        ORDER BY id_azka ASC
     """)
     all_hubs = cursor.fetchall()
 
-    # ===== BUILD ROUTES =====
-    for s in shipments:
-        routes = []
+    # =========================
+    # 📏 HAVERSINE
+    # =========================
+    def haversine(lat1, lon1, lat2, lon2):
+        from math import radians, cos, sin, asin, sqrt
+        R = 6371
+        dlat = radians(lat2 - lat1)
+        dlon = radians(lon2 - lon1)
+        a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+        return 2 * R * asin(sqrt(a))
 
-        # ORIGIN
-        if s['origin_lat'] and s['origin_lng']:
-            routes.append({
-                "lat": s['origin_lat'],
-                "lng": s['origin_lng'],
-                "name": s['origin_name'],
-                "type": "ORIGIN"
-            })
-# ===== PILIH HUB TERDEKAT DARI TUJUAN =====
-        nearest_hub = None
-        nearest_distance = None
+    # =========================
+    # ✅ VALIDASI KOORDINAT
+    # =========================
+    def is_valid_coord(lat, lng):
+        try:
+            return lat is not None and lng is not None and abs(float(lat)) > 0.1 and abs(float(lng)) > 0.1
+        except:
+            return False
 
-        for h in all_hubs:
-            # skip gudang asal
-            if (
-                h['latitude_azka'] == s['origin_lat'] and
-                h['longitude_azka'] == s['origin_lng']
-            ):
+    # =========================
+    # 🎯 HUB TERDEKAT
+    # =========================
+    def get_nearest(point, hubs, exclude=set()):
+        best = None
+        best_dist = float('inf')
+
+        for h in hubs:
+            if not h['latitude_azka'] or not h['longitude_azka']:
                 continue
 
-            dist = haversine(
-                s['destination_lat'],
-                s['destination_lng'],
-                h['latitude_azka'],
-                h['longitude_azka']
-            )
+            lat = float(h['latitude_azka'])
+            lng = float(h['longitude_azka'])
 
-            if nearest_distance is None or dist < nearest_distance:
-                nearest_distance = dist
-                nearest_hub = h
+            key = (round(lat, 4), round(lng, 4))
+            if key in exclude:
+                continue
 
-        # ===== TAMBAHKAN HUB TERPILIH =====
-        if nearest_hub:
+            d = haversine(point[0], point[1], lat, lng)
+
+            if d < best_dist:
+                best_dist = d
+                best = {
+                    "lat": lat,
+                    "lng": lng,
+                    "name": h['nama_azka'],
+                    "distance": d
+                }
+
+        return best
+
+    # =========================
+    # 🚀 NEXT HUB (SMART)
+    # =========================
+    def get_next_hub(current, destination, hubs, visited):
+
+        best = None
+        best_score = float('inf')
+
+        for h in hubs:
+
+            if not h['latitude_azka'] or not h['longitude_azka']:
+                continue
+
+            lat = float(h['latitude_azka'])
+            lng = float(h['longitude_azka'])
+
+            key = (round(lat, 4), round(lng, 4))
+            if key in visited:
+                continue
+
+            d_current = haversine(current[0], current[1], lat, lng)
+            d_dest = haversine(lat, lng, destination[0], destination[1])
+            d_now = haversine(current[0], current[1], destination[0], destination[1])
+
+            # 🔥 jangan menjauh dari tujuan
+            if d_dest > d_now:
+                continue
+
+            # 🔥 hindari lompat jauh
+            if d_current > 300:
+                continue
+
+            # 🔥 hindari stuck
+            if d_current < 5:
+                continue
+
+            score = (d_current * 0.4) + (d_dest * 0.6)
+
+            if score < best_score:
+                best_score = score
+                best = {
+                    "lat": lat,
+                    "lng": lng,
+                    "name": h['nama_azka']
+                }
+
+        return best
+
+    # =========================
+    # 🔁 BUILD ROUTES
+    # =========================
+    for s in shipments:
+
+        # =========================
+        # 🔥 ORIGIN = WAREHOUSE (FIX UTAMA)
+        # =========================
+        origin = None
+        for hub in all_hubs:
+            if hub['id_azka'] == s['warehouse_id_azka']:
+                origin = (float(hub['latitude_azka']), float(hub['longitude_azka']))
+                break
+
+        # fallback (kalau ga ketemu)
+        if not origin and is_valid_coord(s['origin_lat'], s['origin_lng']):
+            origin = (float(s['origin_lat']), float(s['origin_lng']))
+
+        # =========================
+        # 🔥 DESTINATION FIX
+        # =========================
+        if not is_valid_coord(s['destination_lat'], s['destination_lng']):
+            if s['receiver_address_azka']:
+                geo = get_lat_lng_city_from_address(s['receiver_address_azka'] + ", Indonesia")
+                if geo:
+                    s['destination_lat'] = geo.get('lat')
+                    s['destination_lng'] = geo.get('lng')
+
+                    cursor.execute("""
+                        UPDATE tbl_shipment_azka
+                        SET destination_lat=%s, destination_lng=%s
+                        WHERE id_azka=%s
+                    """, (s['destination_lat'], s['destination_lng'], s['id_azka']))
+                    conn.commit()
+
+        if not origin or not is_valid_coord(s['destination_lat'], s['destination_lng']):
+            s['routes'] = []
+            s['truck_position'] = None
+            continue
+
+        destination = (float(s['destination_lat']), float(s['destination_lng']))
+
+        routes = []
+        visited = set()
+
+        # ORIGIN
+        routes.append({
+            "lat": origin[0],
+            "lng": origin[1],
+            "name": s['origin_name'] or "Origin",
+            "type": "ORIGIN"
+        })
+
+        current = origin
+
+        # =========================
+        # 🔁 MULTI HUB
+        # =========================
+        for _ in range(10):
+
+            next_hub = get_next_hub(current, destination, all_hubs, visited)
+
+            if not next_hub:
+                break
+
+            key = (round(next_hub['lat'], 4), round(next_hub['lng'], 4))
+            visited.add(key)
+
             routes.append({
-                "lat": nearest_hub['latitude_azka'],
-                "lng": nearest_hub['longitude_azka'],
-                "name": nearest_hub['nama_azka'],
+                "lat": next_hub['lat'],
+                "lng": next_hub['lng'],
+                "name": next_hub['name'],
                 "type": "HUB"
             })
 
+            current = (next_hub['lat'], next_hub['lng'])
+
+            if haversine(current[0], current[1], destination[0], destination[1]) < 50:
+                break
+
+        # LAST HUB
+        last_hub = get_nearest(destination, all_hubs, visited)
+
+        if last_hub:
+            routes.append({
+                "lat": last_hub['lat'],
+                "lng": last_hub['lng'],
+                "name": last_hub['name'],
+                "type": "HUB_LAST"
+            })
+
+            current = (last_hub['lat'], last_hub['lng'])
 
         # DESTINATION
-        if s['destination_lat'] and s['destination_lng']:
-            routes.append({
-                "lat": s['destination_lat'],
-                "lng": s['destination_lng'],
-                "name": s['receiver_name_azka'],
-                "type": "DESTINATION"
-            })
+        routes.append({
+            "lat": destination[0],
+            "lng": destination[1],
+            "name": s['receiver_name_azka'],
+            "type": "DESTINATION"
+        })
 
         s['routes'] = routes
 
-        # POSISI TRUCK
-        if s['status_azka'] != 'CREATED' and routes:
+        # =========================
+        # 🚚 TRUCK
+        # =========================
+        if s['status_azka'] != 'CREATED':
             s['truck_position'] = {
-                "lat": routes[0]['lat'],
-                "lng": routes[0]['lng']
+                "lat": origin[0],
+                "lng": origin[1]
             }
         else:
             s['truck_position'] = None
 
-        # FIX QR
+        # QR DEFAULT
         if not s['qr_code_data_azka']:
             s['qr_code_data_azka'] = f"PAKET|{s['id_azka']}|{s['tracking_number_azka']}"
 
-    # ===== DATA GUDANG (DROPDOWN) =====
+    # =========================
+    # 📦 DROPDOWN
+    # =========================
     cursor.execute("""
-        SELECT id_azka, nama_azka
+        SELECT id_azka, nama_azka, address_azka, latitude_azka, longitude_azka
         FROM tbl_warehouses_azka
         ORDER BY nama_azka ASC
     """)
@@ -1382,9 +1721,11 @@ def shipment_add_azka():
     try:
         conn.start_transaction()
 
-        # ===== ORIGIN (GUDANG) =====
+        # =============================
+        # ORIGIN
+        # =============================
         cursor.execute("""
-            SELECT latitude_azka, longitude_azka
+            SELECT id_azka, latitude_azka, longitude_azka, nama_azka
             FROM tbl_warehouses_azka
             WHERE id_azka=%s
         """, (warehouse_id,))
@@ -1393,27 +1734,70 @@ def shipment_add_azka():
         if not wh:
             raise Exception("Gudang tidak ditemukan")
 
-        origin_lat = wh['latitude_azka']
-        origin_lng = wh['longitude_azka']
+        origin_lat = float(wh['latitude_azka'])
+        origin_lng = float(wh['longitude_azka'])
+        wh_name = wh['nama_azka']
 
-        # ===== DESTINATION =====
+        # =============================
+        # DESTINATION (GEOCODE)
+        # =============================
         receiver_address = request.form['receiver_address_azka']
-        dest_lat, dest_lng, dest_city = get_lat_lng_city_from_address(receiver_address)
 
-        if not dest_lat or not dest_lng:
-            raise Exception("Alamat tujuan tidak ditemukan")
+        geo_dest = get_lat_lng_city_from_address(receiver_address + ", Indonesia")
 
-        # ===== INSERT SHIPMENT =====
+        if not geo_dest:
+            raise Exception("Gagal geocoding alamat")
+
+        dest_lat = geo_dest.get("lat")
+        dest_lng = geo_dest.get("lng")
+        dest_city = geo_dest.get("city", "Unknown")
+
+        # =============================
+        # 🔥 CARI GUDANG TERDEKAT (AUTO)
+        # =============================
+        cursor.execute("""
+            SELECT id_azka, nama_azka, latitude_azka, longitude_azka
+            FROM tbl_warehouses_azka
+        """)
+        warehouses = cursor.fetchall()
+
+        def distance(lat1, lng1, lat2, lng2):
+            return ((lat1 - lat2)**2 + (lng1 - lng2)**2) ** 0.5
+
+        nearest_wh = None
+        min_dist = 999999
+
+        for w in warehouses:
+            if not w['latitude_azka'] or not w['longitude_azka']:
+                continue
+
+            d = distance(dest_lat, dest_lng, float(w['latitude_azka']), float(w['longitude_azka']))
+
+            if d < min_dist:
+                min_dist = d
+                nearest_wh = w
+
+        if not nearest_wh:
+            raise Exception("Tidak ada gudang tujuan ditemukan")
+
+        destination_wh_id = nearest_wh['id_azka']
+        destination_wh_name = nearest_wh['nama_azka']
+
+        # =============================
+        # INSERT SHIPMENT
+        # =============================
         cursor.execute("""
             INSERT INTO tbl_shipment_azka
             (tracking_number_azka, sender_name_azka, receiver_name_azka,
              receiver_address_azka, receiver_city_azka,
              warehouse_id_azka,
+             destination_warehouse_id_azka,
+             current_warehouse_id_azka,
              origin_lat, origin_lng,
              destination_lat, destination_lng,
              last_lat, last_lng,
              status_azka)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'CREATED')
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'CREATED')
         """, (
             tracking_number,
             request.form['sender_name_azka'],
@@ -1421,22 +1805,57 @@ def shipment_add_azka():
             receiver_address,
             dest_city,
             warehouse_id,
+            destination_wh_id,
+            warehouse_id,  # current = origin
             origin_lat, origin_lng,
             dest_lat, dest_lng,
             origin_lat, origin_lng
         ))
 
         shipment_id = cursor.lastrowid
-        # ===== LOG CREATED =====
+
+        # =============================
+        # ROUTE AWAL (2 TITIK)
+        # =============================
+        cursor.execute("""
+            INSERT INTO tbl_shipment_route_azka
+            (shipment_id_azka, city_azka, lat_azka, lng_azka, status_azka)
+            VALUES (%s,%s,%s,%s,%s)
+        """, (
+            shipment_id,
+            wh_name,
+            origin_lat,
+            origin_lng,
+            "ORIGIN"
+        ))
+
+        cursor.execute("""
+            INSERT INTO tbl_shipment_route_azka
+            (shipment_id_azka, city_azka, lat_azka, lng_azka, status_azka)
+            VALUES (%s,%s,%s,%s,%s)
+        """, (
+            shipment_id,
+            destination_wh_name,
+            nearest_wh['latitude_azka'],
+            nearest_wh['longitude_azka'],
+            "DESTINATION"
+        ))
+
+        # =============================
+        # LOG
+        # =============================
         cursor.execute("""
             INSERT INTO tbl_activity_logs_azka
             (user_id_azka, actions_azka, created_at_azka)
-            VALUES (%s, %s, NOW())
+            VALUES (%s,%s,NOW())
         """, (
             session['user_id_azka'],
-            f"Shipment {shipment_id}|CREATED|Shipment dibuat"
+            f"📦 Shipment dibuat {tracking_number} dari {wh_name} ke {destination_wh_name}"
         ))
-        # ===== QR DATA =====
+
+        # =============================
+        # QR
+        # =============================
         qr_data = f"PAKET|{shipment_id}|{tracking_number}"
 
         cursor.execute("""
@@ -1445,7 +1864,6 @@ def shipment_add_azka():
             WHERE id_azka=%s
         """, (qr_data, shipment_id))
 
-        # ===== GENERATE QR FILE =====
         qr_folder = "static/qr_paket"
         os.makedirs(qr_folder, exist_ok=True)
 
@@ -1453,7 +1871,9 @@ def shipment_add_azka():
         qr_path = f"{qr_folder}/{tracking_number}.png"
         qr_img.save(qr_path)
 
-        # ===== INSERT BARANG =====
+        # =============================
+        # PRODUK
+        # =============================
         cursor.execute("""
             INSERT INTO tbl_products_azka
             (shipment_id_azka, nama_barang_azka, berat_azka, qty_azka)
@@ -1465,13 +1885,12 @@ def shipment_add_azka():
             request.form['qty_azka']
         ))
 
-        # ✅ SEMUA SUKSES
         conn.commit()
-        flash("Shipment + QR paket berhasil dibuat 📦", "success")
+        flash("Shipment AUTO ROUTING berhasil dibuat 🚚🔥", "success")
 
     except Exception as e:
         conn.rollback()
-        print("TRANSACTION ERROR:", e)
+        print("ERROR:", e)
         flash(str(e), "danger")
 
     finally:
@@ -1512,8 +1931,7 @@ def shipment_delete_azka(shipment_id):
             'IN_TRANSIT',
             'SORTING',
             'OUT_FOR_DELIVERY',
-            'ON_THE_WAY',
-            'DELIVERED'
+            'ON_THE_WAY'
         ]
 
         if shipment['status_azka'] in forbidden_status:
@@ -1674,6 +2092,8 @@ def admin_scan_driver_assignment_azka():
 # ===========================
 #   GUDANG DASHBOARD
 # ===========================
+from collections import defaultdict
+from flask import session, flash, redirect, url_for, render_template
 
 @app.route('/gudang_dashboard_azka')
 def gudang_dashboard_azka():
@@ -1688,7 +2108,24 @@ def gudang_dashboard_azka():
     conn = get_db_connection_azka()
     cursor = conn.cursor(dictionary=True)
 
-    # ================= SHIPMENT SORTING (INTI) =================
+    user_id = session['user_id_azka']
+
+    # ================= AMBIL WAREHOUSE USER =================
+    cursor.execute("""
+        SELECT warehouse_id_azka
+        FROM tbl_users_azka
+        WHERE id_azka = %s
+    """, (user_id,))
+    user_data = cursor.fetchone()
+
+    if not user_data:
+        conn.close()
+        flash("User tidak memiliki gudang!", "danger")
+        return redirect(url_for('dashboard_azka'))
+
+    warehouse_id = user_data['warehouse_id_azka']
+
+    # ================= SHIPMENT SORTING =================
     cursor.execute("""
         SELECT
             tracking_number_azka,
@@ -1699,22 +2136,45 @@ def gudang_dashboard_azka():
             updated_at_azka
         FROM tbl_shipment_azka
         WHERE status_azka = 'SORTING'
+        AND warehouse_id_azka = %s
         ORDER BY receiver_city_azka ASC, updated_at_azka DESC
-    """)
+    """, (warehouse_id,))
     rows = cursor.fetchall()
 
-    # 🔥 GROUP BY KOTA
+    # ================= SEMUA BARANG =================
+    cursor.execute("""
+        SELECT
+            tracking_number_azka,
+            receiver_name_azka,
+            receiver_address_azka,
+            receiver_city_azka,
+            status_azka,
+            updated_at_azka
+        FROM tbl_shipment_azka
+        WHERE status_azka IN (
+            'ARRIVED_AT_ORIGIN_HUB',
+            'ARRIVED_AT_DEST_HUB',
+            'SORTING',
+            'TRANSIT_HUB'
+        )
+        AND warehouse_id_azka = %s
+        ORDER BY updated_at_azka DESC
+    """, (warehouse_id,))
+    semua_barang = cursor.fetchall()
+
+    # ================= GROUP BY KOTA =================
     data_per_kota = defaultdict(list)
     for r in rows:
         kota = r['receiver_city_azka'] or 'TIDAK DIKETAHUI'
         data_per_kota[kota].append(r)
 
-    # ================= SHIPMENT DALAM PERJALANAN =================
+    # ================= SHIPMENT SCAN =================
     cursor.execute("""
         SELECT id_azka, tracking_number_azka, status_azka
         FROM tbl_shipment_azka
-        WHERE status_azka IN ('IN_TRANSIT', 'ARRIVED_AT_DEST_HUB')
-    """)
+        WHERE status_azka IN ('TRANSIT_HUB', 'ARRIVED_AT_DEST_HUB')
+        AND warehouse_id_azka = %s
+    """, (warehouse_id,))
     shipment_scan_list_azka = cursor.fetchall()
 
     conn.close()
@@ -1722,10 +2182,87 @@ def gudang_dashboard_azka():
     return render_template(
         'gudang_dashboard_azka.html',
         username_azka=session['username_azka'],
-        data_per_kota=data_per_kota,            # ✅ PENTING
-        shipment_scan_list_azka=shipment_scan_list_azka
+        data_per_kota=data_per_kota,
+        shipment_scan_list_azka=shipment_scan_list_azka,
+        semua_barang=semua_barang
     )
+@app.route('/scan_driver_hub_azka', methods=['POST'])
+def scan_driver_hub_azka():
 
+    if 'user_id_azka' not in session:
+        return jsonify({"status": "danger", "message": "Unauthorized"}), 401
+
+    data = request.get_json()
+    qr_driver = data.get('qr_driver')
+    qr_paket = data.get('qr_paket')
+
+    if not qr_driver or not qr_paket:
+        return jsonify({"status": "danger", "message": "QR tidak lengkap"})
+
+    try:
+        # ===== PARSE DRIVER =====
+        driver_parts = qr_driver.split("|")
+        if driver_parts[0] != "DRIVER":
+            raise ValueError("QR driver tidak valid")
+
+        driver_id = int(driver_parts[1])
+
+        # ===== PARSE PAKET =====
+        paket_parts = qr_paket.split("|")
+        if paket_parts[0] != "PAKET":
+            raise ValueError("QR paket tidak valid")
+
+        shipment_id = int(paket_parts[1])
+        tracking = paket_parts[2]
+
+    except:
+        return jsonify({"status": "danger", "message": "Format QR salah"})
+
+    conn = get_db_connection_azka()
+    cursor = conn.cursor(dictionary=True)
+
+    # cek paket
+    cursor.execute("""
+        SELECT status_azka
+        FROM tbl_shipment_azka
+        WHERE id_azka=%s
+    """, (shipment_id,))
+    shipment = cursor.fetchone()
+
+    if not shipment:
+        conn.close()
+        return jsonify({"status": "danger", "message": "Paket tidak ditemukan"})
+
+    if shipment['status_azka'] != 'WAITING_DRIVER':
+        conn.close()
+        return jsonify({
+            "status": "warning",
+            "message": "Paket belum siap dikirim"
+        })
+
+    # update ke transit antar gudang
+    cursor.execute("""
+        UPDATE tbl_shipment_azka
+        SET status_azka='IN_TRANSIT'
+        WHERE id_azka=%s
+    """, (shipment_id,))
+
+    cursor.execute("""
+        INSERT INTO tbl_activity_logs_azka
+        (user_id_azka, actions_azka, created_at_azka)
+        VALUES (%s,%s,NOW())
+    """, (
+        session['user_id_azka'],
+        f"🚛 Paket {tracking} dibawa driver ke gudang berikutnya"
+    ))
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "status": "success",
+        "message": f"🚛 Paket {tracking} dikirim ke gudang berikutnya"
+    })
 @app.route('/scan_kurir_ready_delivery_azka', methods=['POST'])
 def scan_kurir_ready_delivery_azka():
 
@@ -2505,39 +3042,31 @@ def qr_sopir_azka(driver_id_azka):
 @app.route('/scan_sopir_azka', methods=['POST'])
 def scan_sopir_azka():
 
-    # =============================
-    # AUTH
-    # =============================
     if 'user_id_azka' not in session:
         return {"message": "Unauthorized"}, 401
-
     if session.get('role_id_azka') != 5:
         return {"message": "Forbidden"}, 403
 
     driver_id = session['user_id_azka']
 
-    # =============================
-    # AMBIL DATA JSON
-    # =============================
     data = request.get_json(silent=True) or {}
     scan_type_azka = data.get('scan_type_azka')
     warehouse_id_azka = data.get('warehouse_id_azka')
+    package_id_azka = data.get('package_id_azka')
 
-    print("DEBUG DATA:", data)
+    if scan_type_azka not in ['IN','OUT','RETURN','DROP']:
+        return {"message":"Scan type tidak valid"}, 400
 
-    # =============================
-    # VALIDASI INPUT
-    # =============================
-    if scan_type_azka not in ['IN', 'OUT', 'RETURN']:
-        return {"message": "Scan type tidak valid"}, 400
-
-    if not warehouse_id_azka:
-        return {"message": "Warehouse wajib"}, 400
-
-    try:
-        warehouse_id_azka = int(warehouse_id_azka)
-    except:
-        return {"message": "Warehouse tidak valid"}, 400
+    if scan_type_azka == 'DROP':
+        if not package_id_azka:
+            return {"message":"Package wajib untuk DROP"}, 400
+    else:
+        if not warehouse_id_azka:
+            return {"message":"Warehouse wajib"}, 400
+        try:
+            warehouse_id_azka = int(warehouse_id_azka)
+        except:
+            return {"message": "Warehouse tidak valid"}, 400
 
     conn = get_db_connection_azka()
     cursor = conn.cursor(dictionary=True)
@@ -2546,215 +3075,195 @@ def scan_sopir_azka():
         conn.start_transaction()
 
         # =============================
-        # CEK ADA SHIPMENT AKTIF
+        # VALIDASI DRIVER
         # =============================
         cursor.execute("""
-            SELECT COUNT(*) as total
-            FROM tbl_shipment_azka
-            WHERE driver_id_azka=%s
-            AND status_azka IN (
-                'DRIVER_ASSIGNED',
-                'PICKUP',
-                'ARRIVED_AT_ORIGIN_HUB',
-                'IN_TRANSIT'
-            )
+            SELECT warehouse_id_azka
+            FROM tbl_users_azka
+            WHERE id_azka=%s
         """, (driver_id,))
-        active_job = cursor.fetchone()['total']
+        driver = cursor.fetchone()
+        if not driver:
+            raise Exception("Driver tidak ditemukan")
+        driver_wh = driver['warehouse_id_azka']
+        if not driver_wh:
+            raise Exception("Driver belum punya gudang")
 
         # =============================
         # LAST SCAN
         # =============================
         cursor.execute("""
-            SELECT scan_type_azka
+            SELECT scan_type_azka, warehouse_id_azka
             FROM tbl_driver_scans_azka
             WHERE driver_id_azka=%s
             ORDER BY scan_time_azka DESC
-            LIMIT 1
-            FOR UPDATE
+            LIMIT 1 FOR UPDATE
         """, (driver_id,))
         last_scan = cursor.fetchone()
 
         # =============================
-        # VALIDASI FLOW
+        # VALIDASI FLOW (skip warehouse untuk DROP)
         # =============================
-        if last_scan:
-            last = last_scan['scan_type_azka']
+        if scan_type_azka != 'DROP':
+            if not last_scan:
+                if scan_type_azka != 'IN':
+                    raise Exception("Scan pertama wajib IN")
+                if driver_wh != warehouse_id_azka:
+                    raise Exception("Harus di gudang asal")
+            else:
+                last = last_scan['scan_type_azka']
+                last_wh = last_scan['warehouse_id_azka']
 
-            if last == 'IN' and scan_type_azka != 'OUT':
-                raise Exception("Setelah IN wajib OUT")
-
-            if last == 'OUT' and scan_type_azka not in ['IN', 'RETURN']:
-                raise Exception("Setelah OUT hanya boleh IN atau RETURN")
-
-        else:
-            if scan_type_azka != 'IN':
-                raise Exception("Scan pertama wajib IN")
-
-        # =============================
-        # VALIDASI GUDANG
-        # =============================
-        cursor.execute("""
-            SELECT id_azka, nama_azka, latitude_azka, longitude_azka, address_azka
-            FROM tbl_warehouses_azka
-            WHERE id_azka=%s
-        """, (warehouse_id_azka,))
-        wh = cursor.fetchone()
-
-        if not wh:
-            raise Exception("Gudang tidak ditemukan")
+                if last == 'IN' and scan_type_azka != 'OUT':
+                    raise Exception("Setelah IN wajib OUT")
+                if last == 'OUT' and scan_type_azka not in ['IN','RETURN','DROP']:
+                    raise Exception("Setelah OUT hanya IN/RETURN/DROP")
+                if last == 'RETURN' and scan_type_azka != 'IN':
+                    raise Exception("Setelah RETURN wajib IN")
+                if scan_type_azka == 'OUT' and (last != 'IN' or last_wh != warehouse_id_azka):
+                    raise Exception("OUT hanya setelah IN dan di gudang sama")
+                if scan_type_azka == 'RETURN' and (last != 'OUT' or last_wh != warehouse_id_azka):
+                    raise Exception("RETURN hanya setelah OUT dan di gudang sama")
+                if scan_type_azka == 'IN' and last not in ['OUT','RETURN']:
+                    raise Exception("IN hanya setelah OUT/RETURN")
 
         # =============================
-        # VALIDASI RETURN
+        # DATA GUDANG (skip untuk DROP)
         # =============================
-        if scan_type_azka == 'RETURN':
-
-            if not last_scan or last_scan['scan_type_azka'] != 'OUT':
-                raise Exception("RETURN hanya boleh setelah OUT")
-
-            # cek masih bawa paket
+        wh = None
+        if scan_type_azka != 'DROP':
             cursor.execute("""
-                SELECT COUNT(*) as total
+                SELECT id_azka, nama_azka, latitude_azka, longitude_azka
+                FROM tbl_warehouses_azka
+                WHERE id_azka=%s
+            """, (warehouse_id_azka,))
+            wh = cursor.fetchone()
+            if not wh:
+                raise Exception("Gudang tidak ditemukan")
+
+        # =============================
+        # LOGIKA SCAN
+        # =============================
+        if scan_type_azka == 'IN':
+            cursor.execute("""
+                SELECT id_azka, tracking_number_azka, destination_warehouse_id_azka, status_azka
                 FROM tbl_shipment_azka
                 WHERE driver_id_azka=%s
-                AND status_azka = 'IN_TRANSIT'
+                AND status_azka IN ('PICKUP','ON_DELIVERY','DRIVER_ASSIGNED')
+                FOR UPDATE
             """, (driver_id,))
-            masih_bawa = cursor.fetchone()['total']
-
-            if masih_bawa > 0:
-                raise Exception("Masih ada paket di perjalanan")
-
-        # =============================
-        # AMBIL SHIPMENT
-        # =============================
-        cursor.execute("""
-            SELECT id_azka,
-                   status_azka,
-                   tracking_number_azka,
-                   is_interisland,
-                   warehouse_id_azka
-            FROM tbl_shipment_azka
-            WHERE driver_id_azka=%s
-            AND status_azka NOT IN (
-                'DELIVERED',
-                'READY_FOR_DELIVERY',
-                'TRANSIT_HUB'
-            )
-            FOR UPDATE
-        """, (driver_id,))
-
-        shipments = cursor.fetchall()
-
-        updated_count = 0
-
-        # =============================
-        # PROSES SHIPMENT (KALAU ADA)
-        # =============================
-        if shipments:
+            shipments = cursor.fetchall()
             for s in shipments:
+                if s['status_azka'] == 'DRIVER_ASSIGNED':
+                    new_status = 'PICKUP'
 
-                current_status = s['status_azka']
+                elif s['status_azka'] == 'ON_DELIVERY':
+                    # ❗ JANGAN langsung TRANSIT_HUB
+                    new_status = 'ON_DELIVERY'
 
-                # FLOW STATUS
-                if scan_type_azka == 'RETURN':
-                    next_status = 'ARRIVED_AT_ORIGIN_HUB'
                 else:
-                    next_status_map = {
-                        'DRIVER_ASSIGNED': 'PICKUP',
-                        'PICKUP': 'ARRIVED_AT_ORIGIN_HUB',
-                        'ARRIVED_AT_ORIGIN_HUB': 'IN_TRANSIT',
-                        'IN_TRANSIT': 'TRANSIT_HUB',
-                    }
-                    next_status = next_status_map.get(current_status)
-
-                if not next_status:
-                    continue
-
-                # VALIDASI ORIGIN
-                if current_status == 'DRIVER_ASSIGNED':
-                    if scan_type_azka != 'IN':
-                        raise Exception("Scan pertama di gudang asal wajib IN")
-
-                    if s['warehouse_id_azka'] != warehouse_id_azka:
-                        raise Exception(
-                            f"Shipment {s['tracking_number_azka']} bukan dari gudang ini"
-                        )
-
-                # DRIVER RELEASE
-                new_driver = driver_id
-                if next_status == 'TRANSIT_HUB':
-                    new_driver = None
-
-                # UPDATE
+                    new_status = s['status_azka']
                 cursor.execute("""
                     UPDATE tbl_shipment_azka
-                    SET status_azka=%s,
-                        warehouse_id_azka=%s,
-                        driver_id_azka=%s
+                    SET status_azka=%s, current_warehouse_id_azka=%s
                     WHERE id_azka=%s
-                """, (
-                    next_status,
-                    warehouse_id_azka,
-                    new_driver,
-                    s['id_azka']
-                ))
+                """, (new_status, warehouse_id_azka, s['id_azka']))
+                action_msg = f"📦 Paket Diambil Driver | {s['tracking_number_azka']}" if new_status=='PICKUP' else \
+                             f"📦 Paket Tiba di {wh['nama_azka']} | {s['tracking_number_azka']}"
+                cursor.execute("INSERT INTO tbl_activity_logs_azka (user_id_azka, actions_azka, created_at_azka) VALUES (%s,%s,NOW())",
+                               (driver_id, action_msg))
 
-                # LOG
-                wh_next_city = wh['address_azka'] if wh.get('address_azka') else ''
-                desc = get_description(
-                    next_status,
-                    wh['nama_azka'],
-                    s.get('is_interisland', False),
-                    s.get('receiver_city_azka', ''),
-                    wh_next_city
-                )
+        elif scan_type_azka == 'OUT':
+            cursor.execute("""
+                SELECT id_azka, tracking_number_azka
+                FROM tbl_shipment_azka
+                WHERE driver_id_azka=%s
+                AND status_azka IN ('PICKUP','ON_DELIVERY')
+                FOR UPDATE
+            """, (driver_id,))
+            shipments = cursor.fetchall()
+            for s in shipments:
+                cursor.execute("UPDATE tbl_shipment_azka SET status_azka='ON_DELIVERY' WHERE id_azka=%s", (s['id_azka'],))
+                cursor.execute("INSERT INTO tbl_activity_logs_azka (user_id_azka, actions_azka, created_at_azka) VALUES (%s,%s,NOW())",
+                               (driver_id, f"🚚Paket Berangkat dari {wh['nama_azka']} | {s['tracking_number_azka']}"))
 
-                cursor.execute("""
-                    INSERT INTO tbl_activity_logs_azka
-                    (user_id_azka, actions_azka, created_at_azka)
-                    VALUES (%s,%s,NOW())
-                """, (
-                    driver_id,
-                    f"{desc} | {s['tracking_number_azka']}"
-                ))
+        elif scan_type_azka == 'DROP':
 
-                updated_count += 1
-
-        else:
             # =============================
-            # KALAU TIDAK ADA SHIPMENT
+            # AMBIL DATA PAKET
             # =============================
-            if scan_type_azka != 'RETURN':
-                raise Exception("Tidak ada shipment aktif")
+            cursor.execute("""
+                SELECT id_azka, tracking_number_azka, destination_warehouse_id_azka, driver_id_azka, status_azka
+                FROM tbl_shipment_azka
+                WHERE id_azka=%s
+                FOR UPDATE
+            """, (package_id_azka,))
+            shipment = cursor.fetchone()
+
+            if not shipment:
+                raise Exception("Paket tidak ditemukan")
+
+            # =============================
+            # VALIDASI DRIVER
+            # =============================
+            if shipment['driver_id_azka'] != driver_id:
+                raise Exception("Paket bukan tanggung jawab driver ini")
+
+            # =============================
+            # VALIDASI STATUS
+            # =============================
+            if shipment['status_azka'] != 'ON_DELIVERY':
+                raise Exception(f"Tidak bisa DROP, status sekarang: {shipment['status_azka']}")
+
+            # =============================
+            # VALIDASI FLOW (WAJIB SUDAH IN)
+            # =============================
+            if not last_scan or last_scan['scan_type_azka'] != 'IN':
+                raise Exception("DROP hanya bisa setelah IN (sampai gudang)")
+
+            # =============================
+            # VALIDASI GUDANG TUJUAN
+            # =============================
+            if last_scan['warehouse_id_azka'] != shipment['destination_warehouse_id_azka']:
+                raise Exception("DROP harus di gudang tujuan paket")
+
+            # =============================
+            # UPDATE STATUS
+            # =============================
+            cursor.execute("""
+                UPDATE tbl_shipment_azka
+                SET status_azka='TRANSIT_HUB',
+                    current_warehouse_id_azka=destination_warehouse_id_azka,
+                    driver_id_azka=NULL
+                WHERE id_azka=%s
+            """, (package_id_azka,))
+
+            # =============================
+            # LOG
+            # =============================
+            cursor.execute("""
+                INSERT INTO tbl_activity_logs_azka (user_id_azka, actions_azka, created_at_azka)
+                VALUES (%s, %s, NOW())
+            """, (driver_id, f"📍 Paket tiba di gudang tujuan | {shipment['tracking_number_azka']}"))
+
+            conn.commit()
+            return {"message": "DROP berhasil"}
 
         # =============================
-        # SIMPAN SCAN
+        # SIMPAN SCAN (IN/OUT/RETURN)
         # =============================
         cursor.execute("""
             INSERT INTO tbl_driver_scans_azka
-            (driver_id_azka,
-             warehouse_id_azka,
-             scan_type_azka,
-             latitude_azka,
-             longitude_azka,
-             scan_time_azka)
+            (driver_id_azka, warehouse_id_azka, scan_type_azka, latitude_azka, longitude_azka, scan_time_azka)
             VALUES (%s,%s,%s,%s,%s,NOW())
-        """, (
-            driver_id,
-            warehouse_id_azka,
-            scan_type_azka,
-            wh['latitude_azka'],
-            wh['longitude_azka']
-        ))
+        """, (driver_id, warehouse_id_azka, scan_type_azka, wh['latitude_azka'], wh['longitude_azka']))
 
         conn.commit()
-
-        return {
-            "message": f"OK - {updated_count} shipment diproses"
-        }
+        return {"message": f"{scan_type_azka} berhasil"}
 
     except Exception as e:
         conn.rollback()
-        print("ERROR SCAN SOPIR:", e)
+        print("ERROR:", e)
         return {"message": str(e)}, 400
 
     finally:
@@ -2813,13 +3322,23 @@ def dashboard_sopir_azka():
         AND status_azka NOT IN ('DELIVERED','READY_FOR_DELIVERY')
     """, (session['user_id_azka'],))
     shipment_active = cursor.fetchone()['total']
+    # Ambil hanya paket yang sedang dibawa kurir
+    cursor.execute("""
+        SELECT s.id_azka, s.tracking_number_azka, s.status_azka
+        FROM tbl_shipment_azka s
+        WHERE s.driver_id_azka = %s
+        AND s.status_azka IN ('PICKUP','ON_DELIVERY')
+        ORDER BY s.id_azka ASC
+    """, (session['user_id_azka'],))
+    paket_dibawa = cursor.fetchall()
     conn.close()
     return render_template(
         'dashboard_sopir_azka.html',
         kurir_azka=kurir_azka,
         last_scan_azka=last_scan_azka,
         riwayat_pengiriman=riwayat_pengiriman,
-        shipment_active=shipment_active
+        shipment_active=shipment_active,
+        paket_dibawa=paket_dibawa
     )
 
 

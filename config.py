@@ -12,7 +12,7 @@ class Config:
     DB_HOST = os.environ.get("DB_HOST", "localhost")
     DB_USER = os.environ.get("DB_USER", "root")
     DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
-    DB_NAME = os.environ.get("DB_NAME", "db_logistik_barang_azka")
+    DB_NAME = os.environ.get("DB_NAME", "db_logistik_barang_azkaa")
 
     @staticmethod
     def get_db_config():

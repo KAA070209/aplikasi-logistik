@@ -815,7 +815,10 @@
                 {{ s.receiver_name_azka }}<br>
                 <small class="text-muted">{{ s.receiver_address_azka }}</small>
             </td>
-            <td>{{ s.origin_name }}</td>
+            <td>
+                {{ s.origin_name }}<br>
+                <small class="text-muted">{{ s.origin_address or '-' }}</small>
+            </td>
             <td>{{ s.courier or '-' }}</td>
             <td>
                 
@@ -834,19 +837,19 @@
             </td>
             <td>{{ s.created_at_azka }}</td>
             <td>
-                <form action="/shipment_delete_azka/{{ s.id_azka }}" method="POST"
+                <!-- <form action="/shipment_delete_azka/{{ s.id_azka }}" method="POST"
                     onsubmit="return confirm('Yakin hapus shipment ini?')">
 
                     <button type="submit" class="btn btn-sm btn-danger mt-1">
                         <i class="bi bi-trash"></i>
                     </button>
-                </form>
+                </form> -->
                 <button type="button"
                     class="btn btn-sm btn-primary mt-1 w-100"
-                    onclick='openTrackingModal(
-                        {{ s.routes | tojson }},
+onclick='openTrackingModal(
+                        {{ s.routes | tojson | safe }},
                         "{{ s.status_azka }}",
-                        {{ s.truck_position | tojson }}
+                        {{ s.truck_position | tojson | safe | default('null') }}
                     )'>
                     <i class="bi bi-geo-alt-fill"></i> Tracking
                 </button>
@@ -1024,7 +1027,6 @@ function distance(lat1, lng1, lat2, lng2) {
 }
 </script>
 <script>
-
 let trackingMap = null;
 let truckMarker = null;
 let routeLine = null;
@@ -1033,41 +1035,13 @@ let animationFrameId = null;
 let currentProgress = 0;
 let globalCoords = [];
 let isAnimating = false;
-let shipmentStatusGlobal = null;
-
-/* ================= ICON ================= */
-
-const warehouseIcon = L.icon({
-    iconUrl: 'https://cdn-icons-png.flaticon.com/512/684/684908.png',
-    iconSize: [32, 32],
-    iconAnchor: [16, 32]
-});
-
-const hubIcon = L.icon({
-    iconUrl: 'https://cdn-icons-png.flaticon.com/512/535/535239.png',
-    iconSize: [28, 28],
-    iconAnchor: [14, 28]
-});
-
-const destinationIcon = L.icon({
-    iconUrl: 'https://cdn-icons-png.flaticon.com/512/684/684809.png',
-    iconSize: [32, 32],
-    iconAnchor: [16, 32]
-});
-
-const truckIcon = L.icon({
-    iconUrl: 'https://cdn-icons-png.flaticon.com/512/3448/3448339.png',
-    iconSize: [36, 36],
-    iconAnchor: [18, 36]
-});
-
 
 /* ================= OPEN MODAL ================= */
-
 function openTrackingModal(routes, status, truckPosition) {
 
     const modalEl = document.getElementById('trackingModal');
     const modal = new bootstrap.Modal(modalEl);
+
     modal.show();
 
     modalEl.addEventListener('shown.bs.modal', () => {
@@ -1078,58 +1052,77 @@ function openTrackingModal(routes, status, truckPosition) {
     }, { once: true });
 }
 
-
 /* ================= RENDER MAP ================= */
-
 function renderTrackingMap(routes, status, truckPosition) {
 
+    console.log('Routes received:', routes);
+    
+    // Show basic map even if no routes
     if (!routes || routes.length === 0) {
-        alert("Data tracking tidak tersedia");
-        return;
+        routes = [{lat: -6.2, lng: 106.8, name: 'Jakarta', type: 'ORIGIN'}]; // fallback
+        console.log('Using fallback routes');
     }
 
+    // RESET TOTAL
     if (trackingMap) {
         trackingMap.remove();
         trackingMap = null;
     }
+
+    if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+    }
+
+    truckMarker = null;
+    routeLine = null;
+    globalCoords = [];
+    currentProgress = 0;
+    isAnimating = false;
 
     trackingMap = L.map('trackingMap').setView(
         [routes[0].lat, routes[0].lng],
         6
     );
 
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap'
-    }).addTo(trackingMap);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png')
+        .addTo(trackingMap);
 
     let points = [];
-    let hubIndex = 1;
 
     routes.forEach(r => {
-
         if (!r.lat || !r.lng) return;
 
         const lat = parseFloat(r.lat);
         const lng = parseFloat(r.lng);
 
-        let icon = warehouseIcon;
-        let label = "Gudang Asal";
-
-        if (r.type === "HUB") {
-            icon = hubIcon;
-            label = `Hub Transit ${hubIndex}`;
-            hubIndex++;
+        // Custom icons based on type
+        let iconHtml = '<i class="bi bi-geo-fill"></i>';
+        let iconClass = 'custom-marker';
+        
+        if (r.type === 'ORIGIN') {
+            iconHtml = '<i class="bi bi-geo-alt-fill text-success"></i>';
+        } else if (r.type === 'HUB') {
+            iconHtml = '<i class="bi bi-building text-info"></i>';
+        } else if (r.type === 'DESTINATION') {
+            iconHtml = '<i class="bi bi-house-door-fill text-danger"></i>';
         }
 
-        if (r.type === "DESTINATION") {
-            icon = destinationIcon;
-            label = "Tujuan";
-        }
+        // Simple marker with popup above
+        L.marker([lat, lng]).addTo(trackingMap)
+            .bindPopup(
+                '<div style="font-family: Inter; padding:10px; text-align:center;">' +
+                '<strong style="font-size:14px;">' + (r.name || 'Lokasi') + '</strong><br>' +
+                '<small style="color:#6b7280;">' + (r.type || '') + '</small><br>' +
 
-        L.marker([lat, lng], { icon })
-            .addTo(trackingMap)
-            .bindPopup(`<b>${r.name}</b><br>${label}`);
+                (r.distance ? 
+                    '<span style="color:#6366f1;font-weight:600;">📏 ' + r.distance + ' km</span>' 
+                    : ''
+                ) +
 
+                '</div>',
+                {closeButton:false, offset:[0,-30]}
+            );
+        
         points.push([lat, lng]);
     });
 
@@ -1137,123 +1130,99 @@ function renderTrackingMap(routes, status, truckPosition) {
 
         routeLine = L.Routing.control({
             waypoints: points.map(p => L.latLng(p[0], p[1])),
-            router: L.Routing.osrmv1({
-                serviceUrl: 'https://router.project-osrm.org/route/v1'
-            }),
             addWaypoints: false,
             draggableWaypoints: false,
-            fitSelectedRoutes: true,
+            routeWhileDragging: false,
             show: false,
-            lineOptions: {
-                styles: [{ weight: 5, opacity: 0.8 }]
-            },
             createMarker: () => null
         }).addTo(trackingMap);
 
-        if (!truckMarker) {
-            truckMarker = L.marker(points[0], { icon: truckIcon }).addTo(trackingMap);
-        }
-
         routeLine.on('routesfound', function (e) {
 
-        globalCoords = e.routes[0].coordinates;
-        shipmentStatusGlobal = status;
+            globalCoords = e.routes[0].coordinates;
 
-        // ===== STATUS DIAM =====
-        if (status === "CREATED" || status === "PICKUP") {
-            currentProgress = 0;
-            isAnimating = false;
-        }
+            // INIT TRUCK
+            truckMarker = L.marker(
+                [globalCoords[0].lat, globalCoords[0].lng]
+            ).addTo(trackingMap);
 
-        else if (
-            status === "ARRIVED_AT_ORIGIN_HUB" ||
-            status === "SORTING"
-        ) {
-            currentProgress = Math.floor(globalCoords.length * 0.25);
-            isAnimating = false;
-        }
+            // STATUS LOGIC
+            if (status === "DELIVERED") {
+                currentProgress = globalCoords.length - 1;
+                updateTruck();
+                return;
+            }
 
-        // ===== STATUS BERJALAN =====
-        else if (
-            status === "IN_TRANSIT" ||
-            status === "OUT_FOR_DELIVERY" ||
-            status === "ON_THE_WAY"
-        ) {
-            if (!isAnimating) {
+            if (["IN_TRANSIT", "OUT_FOR_DELIVERY"].includes(status)) {
                 isAnimating = true;
                 animateTruck();
+            } else {
+                currentProgress = 0;
+                updateTruck();
             }
-        }
 
-        // ===== STATUS SELESAI =====
-        else if (status === "DELIVERED") {
-            currentProgress = globalCoords.length - 1;
-            isAnimating = false;
-        }
-
-        updateTruckPosition();
-    });
+        });
     }
 }
 
-
-/* ================= ANIMATION ENGINE ================= */
+/* ================= ANIMATION ================= */
 function animateTruck() {
-
-    const speed = 0.0025;
 
     function step() {
 
         if (!isAnimating) return;
 
-        currentProgress += speed;
+        currentProgress += 0.003;
 
         if (currentProgress >= globalCoords.length - 1) {
             currentProgress = globalCoords.length - 1;
             isAnimating = false;
-            updateTruckPosition();
-            return;
         }
 
-        updateTruckPosition();
-        requestAnimationFrame(step);
+        updateTruck();
+
+        animationFrameId = requestAnimationFrame(step);
     }
 
-    requestAnimationFrame(step);
+    animationFrameId = requestAnimationFrame(step);
 }
 
-/* ================= UPDATE POSITION ================= */
-
-function updateTruckPosition() {
+/* ================= UPDATE ================= */
+function updateTruck() {
 
     if (!truckMarker || globalCoords.length === 0) return;
 
-    const index = Math.floor(currentProgress);
-    const nextIndex = index + 1;
+    const i = Math.floor(currentProgress);
+    const next = i + 1;
 
-    if (nextIndex >= globalCoords.length) return;
+    if (next >= globalCoords.length) return;
 
-    const start = globalCoords[index];
-    const end = globalCoords[nextIndex];
+    const start = globalCoords[i];
+    const end = globalCoords[next];
 
-    const t = currentProgress - index;
+    const t = currentProgress - i;
 
     const lat = start.lat + (end.lat - start.lat) * t;
     const lng = start.lng + (end.lng - start.lng) * t;
 
     truckMarker.setLatLng([lat, lng]);
-
-    const angle = Math.atan2(
-        end.lng - start.lng,
-        end.lat - start.lat
-    ) * (180 / Math.PI);
-
-    if (truckMarker.setRotationAngle) {
-        truckMarker.setRotationAngle(angle);
-    }
 }
 
+/* ================= CLEANUP ================= */
+document.getElementById('trackingModal')
+.addEventListener('hidden.bs.modal', function () {
 
+    if (trackingMap) {
+        trackingMap.remove();
+        trackingMap = null;
+    }
+
+    if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+    }
+
+    isAnimating = false;
+});
 /* ================= MODAL CLOSE ================= */
 
 document.getElementById('trackingModal')

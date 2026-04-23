@@ -48,6 +48,10 @@
             </div>
             <a href="/logout_azka" class="btn btn-outline-danger btn-sm">Logout</a>
         </div>
+        <div class="row g-3 mb-4">
+
+
+</div>
         <div class="card-box mb-4">
             <h5>📦 Paket Siap Disortir per Wilayah</h5>
 
@@ -84,6 +88,46 @@
             </div>
             {% endfor %}
         </div>
+        <div class="card-box mb-4">
+        <h5>📦 Barang Masuk Gudang (Lengkap)</h5>
+
+        <table class="table table-bordered table-sm">
+            <thead class="table-dark">
+                <tr>
+                    <th>No Resi</th>
+                    <th>Nama Barang</th>
+                    <th>Penerima</th>
+                    <th>Kota Tujuan</th>
+                    <th>Alamat</th>
+                    <th>Status</th>
+                    <th>Update</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in semua_barang %}
+                <tr>
+                    <td><b>{{ p.tracking_number_azka }}</b></td>
+                    <td>{{ p.item_name_azka }}</td>
+                    <td>{{ p.receiver_name_azka }}</td>
+                    <td>{{ p.receiver_city_azka }}</td>
+                    <td>{{ p.receiver_address_azka }}</td>
+                    <td>
+                        {% if p.status_azka == 'SORTING' %}
+                            <span class="badge bg-warning">SORTING</span>
+                        {% elif p.status_azka == 'IN_TRANSIT' %}
+                            <span class="badge bg-primary">IN TRANSIT</span>
+                        {% elif p.status_azka == 'ARRIVED_AT_DEST_HUB' %}
+                            <span class="badge bg-success">SAMPAI HUB</span>
+                        {% else %}
+                            <span class="badge bg-secondary">{{ p.status_azka }}</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ p.updated_at_azka }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
         <!-- ================= SORTIR ================= -->
         <div class="card-box mb-4">
             <h5>📦 Scan Paket Masuk Sortir</h5>
@@ -99,29 +143,29 @@
             <div id="resultSortir" class="mt-3"></div>
         </div>
 
-        <!-- ================= SERAH KURIR ================= -->
         <div class="card-box mb-4">
-        <h5>🚚 Serahkan ke Kurir</h5>
+            <h5>🚛 Kirim ke Gudang Berikutnya (Driver)</h5>
 
-        <div class="alert alert-info">
-            1️⃣ Scan QR Kurir <br>
-            2️⃣ Scan QR Paket
+            <div class="alert alert-info">
+                1️⃣ Scan QR Driver <br>
+                2️⃣ Scan QR Paket
+            </div>
+
+            <input type="text" id="scanDriver" class="form-control scan-input"
+                placeholder="Scan Driver / Paket">
+
+            <button class="btn btn-dark mt-2" onclick="startDriverScanner()">
+                Mulai Scanner
+            </button>
+
+            <div id="readerDriver"></div>
+            <div id="resultDriver" class="mt-3"></div>
         </div>
-
-        <input type="text" id="scanKurir" class="form-control scan-input"
-            placeholder="Scan Kurir / Paket">
-
-        <button class="btn btn-success mt-2" onclick="startKurirScanner()">
-            Mulai Scanner
-        </button>
-
-        <div id="readerKurir"></div>
-        <div id="resultKurir" class="mt-3"></div>
     </div>
     </div>
 
     <footer class="text-center text-muted py-3">
-        Logistics Azka © 2026
+        &copy; Logistics. All rights reserved.
     </footer>
 
     <script>
@@ -311,7 +355,83 @@
         prosesSerah(qr);
 
     });
+let driverScannerStarted = false;
+let driverScanner = null;
+let qrDriver = null;
 
+function startDriverScanner() {
+
+    if (driverScannerStarted) return;
+
+    driverScannerStarted = true;
+
+    driverScanner = new Html5QrcodeScanner(
+        "readerDriver",
+        { fps: 10, qrbox: 250 }
+    );
+
+    driverScanner.render((decodedText) => {
+        prosesDriver(decodedText);
+    });
+}
+
+function prosesDriver(qr) {
+
+    // STEP 1: SCAN DRIVER
+    if (!qrDriver) {
+
+        if (!qr.startsWith("DRIVER|")) {
+
+            document.getElementById("resultDriver").innerHTML =
+                `<div class="alert alert-danger">Scan QR Driver dulu</div>`;
+            playSound("danger");
+            return;
+        }
+
+        qrDriver = qr;
+
+        document.getElementById("resultDriver").innerHTML =
+            `<div class="alert alert-warning">Driver siap, scan paket...</div>`;
+        playSound("success");
+
+        return;
+    }
+
+    // STEP 2: SCAN PAKET
+    fetch("/scan_driver_hub_azka", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            qr_driver: qrDriver,
+            qr_paket: qr
+        })
+    })
+    .then(res => res.json())
+    .then(data => {
+
+        document.getElementById("resultDriver").innerHTML =
+            `<div class="alert alert-${data.status}">${data.message}</div>`;
+
+        playSound(data.status);
+
+        if (data.status === "success") {
+            qrDriver = null;
+        }
+
+    });
+}
+
+// manual input
+document.getElementById("scanDriver").addEventListener("change", function () {
+
+    const qr = this.value.trim();
+    this.value = "";
+
+    if (!qr) return;
+
+    prosesDriver(qr);
+
+});
 </script>
 </body>
 
